@@ -3,7 +3,7 @@ layout: home
 title: Queens Without Backtracking
 ---
 
-*By [Michael Spiegel](https://mspiegel.github.io/). The Rust source code, the rule writeups in [`QUEENS.md`](QUEENS.html) and [`HEURISTICS.md`](HEURISTICS.html), the design notes in [`PLAN.md`](https://github.com/mspiegel/queens-without-backtracking/blob/main/PLAN.md), and this documentation were all written with the assistance of [Claude Code](https://www.anthropic.com/claude-code), using the Claude Opus 4.7 model.*
+*By [Michael Spiegel](https://mspiegel.github.io/). The Rust source code, the rule writeups in [`QUEENS.md`](QUEENS.html) and [`HEURISTICS.md`](HEURISTICS.html), the design notes in [`PLAN.md`](PLAN.html), and this documentation were all written with the assistance of [Claude Code](https://www.anthropic.com/claude-code), using the Claude Opus 4.7 model.*
 
 ## Hypothesis
 
@@ -149,3 +149,4 @@ Board format is the whitespace-separated letter grid shown in [`QUEENS.md`](QUEE
 - [GitHub repository](https://github.com/mspiegel/queens-without-backtracking) — source code
 - [`QUEENS.md`](QUEENS.html) — the rules of the puzzle
 - [`HEURISTICS.md`](HEURISTICS.html) — every propagation rule with pseudocode and validity
+- [`PLAN.md`](PLAN.html) — solver design notes
