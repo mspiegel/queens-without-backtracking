@@ -1,0 +1,40 @@
+.♛......
+.......♛
+.....♛..
+...♛....
+♛.......
+..♛.....
+....♛...
+......♛.
+
+Queen-adjacent kill            : 8
+Single-cell region             : 2
+Single-cell row / column       : 1
+Region-confined-to-line        : 1
+Line-confined-to-region        : 1
+polyomino_domino               : 1
+polyomino_i_tromino            : 0
+polyomino_l_tromino            : 1
+polyomino_t_tetromino          : 0
+polyomino_l_tetromino          : 0
+polyomino_s_tetromino          : 0
+polyomino_l_pentomino          : 0
+polyomino_f_pentomino          : 0
+polyomino_n_pentomino          : 0
+polyomino_t_pentomino          : 0
+polyomino_u_pentomino          : 0
+polyomino_v_pentomino          : 0
+polyomino_w_pentomino          : 0
+polyomino_z_with_tab_hexomino  : 0
+polyomino_l_hexomino           : 0
+polyomino_n_hexomino           : 0
+polyomino_long_n_hexomino      : 0
+polyomino_c_hexomino           : 0
+polyomino_s_block_hexomino     : 0
+polyomino_f_ext_a_hexomino     : 0
+polyomino_n_ext_a_hexomino     : 0
+polyomino_t_ext_hexomino       : 0
+polyomino_w_ext_hexomino       : 0
+polyomino_t_hexomino           : 0
+N-regions-in-N-lines           : 1
+Placement-forces-contradiction : 0

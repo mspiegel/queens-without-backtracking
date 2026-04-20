@@ -1,0 +1,13 @@
+[package]
+name = "linkedin-queens"
+version = "0.1.0"
+edition = "2021"
+description = "Heuristics-only solver for LinkedIn Queens puzzles"
+
+[[bin]]
+name = "queens-solver"
+path = "src/main.rs"
+
+[lib]
+name = "linkedin_queens"
+path = "src/lib.rs"
