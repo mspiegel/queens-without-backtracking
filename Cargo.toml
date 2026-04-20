@@ -3,6 +3,8 @@ name = "linkedin-queens"
 version = "0.1.0"
 edition = "2021"
 description = "Heuristics-only solver for LinkedIn Queens puzzles"
+license = "MIT OR Apache-2.0"
+authors = ["Michael Spiegel"]
 
 [[bin]]
 name = "queens-solver"
