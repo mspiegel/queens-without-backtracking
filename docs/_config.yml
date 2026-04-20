@@ -1,0 +1,6 @@
+title: Queens Without Backtracking
+description: A heuristics-only solver for LinkedIn Queens puzzles.
+theme: minima
+header_pages:
+  - QUEENS.md
+  - HEURISTICS.md

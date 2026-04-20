@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+docs/_site/
+docs/.jekyll-cache/
