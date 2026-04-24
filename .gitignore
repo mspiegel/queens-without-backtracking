@@ -4,3 +4,6 @@
 .DS_Store
 docs/_site/
 docs/.jekyll-cache/
+__pycache__/
+/synthetic/
+/solutions/synthetic/

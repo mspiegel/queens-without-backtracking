@@ -5,8 +5,10 @@
 
 pub mod board;
 pub mod counters;
+pub mod generator;
 pub mod nregions;
 pub mod output;
+pub mod partition_count;
 pub mod polyomino;
 pub mod polyomino_enum;
 pub mod rules;

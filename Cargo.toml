@@ -6,9 +6,36 @@ description = "Heuristics-only solver for LinkedIn Queens puzzles"
 license = "MIT OR Apache-2.0"
 authors = ["Michael Spiegel"]
 
+[dependencies]
+rand = "0.8"
+num-bigint = "0.4"
+num-traits = "0.2"
+rustc-hash = "2"
+rayon = "1.10"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+parking_lot = "0.12"
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[dev-dependencies]
+assert_cmd = "2"
+
 [[bin]]
 name = "queens-solver"
 path = "src/main.rs"
+
+[[bin]]
+name = "queens-generator"
+path = "src/bin/generator.rs"
+
+[[bin]]
+name = "count-partitions"
+path = "src/bin/count_partitions.rs"
 
 [lib]
 name = "linkedin_queens"

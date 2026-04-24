@@ -534,6 +534,57 @@ ACCD
     }
 
     #[test]
+    fn apply_n_regions_in_n_rows_catches_pure_undercounting_case() {
+        // Shapes A and B both live only in rows 0-1 (n=2 undercounting).
+        // The only non-{A,B} cell inside those rows is (1,1)=C; the rule
+        // must kill it via the tight block {A,B}/{0,1}.
+        let input = "\
+AAABB
+ACABB
+CCCCC
+DDDDD
+EEEEE
+";
+        let board = board::parse(input).expect("parse");
+        let mut state = crate::state::State::new(&board);
+        let changed = apply_n_regions_in_n_rows(&mut state);
+        assert!(changed);
+        assert!(!state.is_live(1, 1));
+        for (r, c) in [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 2),
+                       (1, 3), (1, 4), (2, 0), (2, 1), (2, 2), (2, 3), (2, 4),
+                       (3, 0), (4, 0)] {
+            assert!(state.is_live(r, c), "expected ({r},{c}) still live");
+        }
+    }
+
+    #[test]
+    fn apply_n_regions_in_n_rows_catches_pure_overcounting_case() {
+        // Rows 0-1 have their live cells entirely inside shapes A and B
+        // (n=2 overcounting). The one A-cell outside rows 0-1 is (2,0),
+        // which the rule must kill. No n=2 region-tight block matches
+        // {A,B}/{0,1}'s complement directly; instead D-M emits the smaller
+        // dominating block {C}/{2} (C is confined to row 2), whose
+        // undercounting kill at (2,0) realizes the overcounting deduction.
+        let input = "\
+AAABB
+AAABB
+ACCCC
+DDDDD
+EEEEE
+";
+        let board = board::parse(input).expect("parse");
+        let mut state = crate::state::State::new(&board);
+        let changed = apply_n_regions_in_n_rows(&mut state);
+        assert!(changed);
+        assert!(!state.is_live(2, 0));
+        for (r, c) in [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1),
+                       (1, 2), (1, 3), (1, 4), (2, 1), (2, 2), (2, 3), (2, 4),
+                       (3, 0), (4, 0)] {
+            assert!(state.is_live(r, c), "expected ({r},{c}) still live");
+        }
+    }
+
+    #[test]
     fn apply_n_regions_in_n_rows_is_noop_when_dirty_flag_clear() {
         let input = "\
 AABB
