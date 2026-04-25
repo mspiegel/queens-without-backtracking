@@ -1,9 +1,11 @@
 //! `count-partitions <N>` — count tilings of an N×N board by exactly N fixed
 //! polyominoes. Final count prints to stdout as a decimal. Progress and
 //! diagnostics go to stderr.
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+//!
+//! Uses the system allocator rather than mimalloc: mimalloc holds ~50% of
+//! peak RSS as retained-freed memory on this workload (measured at N=10),
+//! and the system allocator's more aggressive page return drops peak RSS
+//! from 5.1 GB to 2.6 GB at a ~5% wall-time cost.
 
 use clap::Parser;
 use linkedin_queens::partition_count::{count_partitions, CountError, CountOptions};

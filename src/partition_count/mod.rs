@@ -16,3 +16,7 @@ pub use simpath::{count_partitions, CountError, CountOptions, CountReport};
 /// so integration tests can cross-validate against it; not intended as a
 /// stable API.
 pub mod brute_force;
+
+/// Independent set-partition enumerator used only for testing. Exhaustive and
+/// slow; serves as ground truth for small N (practical up to N=3).
+pub mod partition_oracle;

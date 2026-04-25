@@ -1,34 +1,66 @@
-//! Frontier DP that counts tilings of an N×N board by exactly N fixed
-//! polyominoes.
+//! Frontier DP that counts partitions of an N×N board into exactly N
+//! connected components (equivalently, tilings by exactly N fixed
+//! polyominoes).
 //!
 //! Cells are placed in row-major order. A `FxHashMap<State, Count>` holds the
 //! current layer; after each cell is placed the old layer is replaced by the
 //! newly-built one. At any point during the scan, the state describes the
 //! labeling of the last `min(k, N)` placed cells — a superset of the true
-//! frontier. Labels are kept in restricted-growth canonical form so that two
-//! states are equal iff their connectivity patterns are equal.
+//! frontier — plus a **Forbidden-Pair Set (FPS)** recording pairs of
+//! components that are forbidden from ever merging. Labels are kept in
+//! restricted-growth canonical form; the FPS is permuted by the same
+//! renumbering, so two states are equal iff their labeled-and-forbidden
+//! structure is equal.
 //!
-//! For each cell k, the up-neighbor (index k − N, always at slot 0 when it
-//! exists) and the left-neighbor (always at the last occupied slot when
-//! c > 0) contribute labels that drive the choice of transition:
+//! **Why the FPS.** Without it, "start a new component at X and merge it
+//! with U later" produces the same final partition as "join U directly
+//! at X", and both paths would be counted. Following Graphillion's
+//! `GraphRangePartitionSpec::{takable, doTake, doNotTake}`, each placement
+//! of cell X commits the two incident grid edges (X, up) and (X, left): each
+//! edge is either *taken* (X joins that neighbor's component) or *not taken*
+//! (the component pair is added to FPS). Each partition then corresponds to
+//! exactly one sequence of edge decisions — take every within-block edge,
+//! don't-take every between-block edge — so it is counted once.
 //!
-//!   A. Start a new polyomino (always permitted; reachability prune decides).
-//!   B. Join the up-neighbor's polyomino.
-//!   C. Join the left-neighbor's polyomino (only if distinct from up's).
-//!   D. Merge the up and left polyominoes (only if both exist and differ).
+//! For each cell k the up-neighbor U (slot 0 in the pre-place window) and
+//! the left-neighbor L (last occupied slot when c > 0) drive the transition
+//! choice. The combos and the FPS effects are:
 //!
-//! Option A is deliberately ungated: a cell may start a fresh polyomino even
-//! when the total has already reached N, because a later cell can merge two
-//! labels back together. The reachability prune `|total − N| ≤ cells_remaining`
-//! drops any state that can no longer hit exactly N by the final cell.
+//!   | up | left | transitions |
+//!   |----|------|-------------|
+//!   | –  | –    | new |
+//!   | U  | –    | join U;  new + FPS(new, U) |
+//!   | –  | L    | join L;  new + FPS(new, L) |
+//!   | U==L | U==L | join;   new + FPS(new, U) |
+//!   | U≠L | U≠L  | merge U,L (iff ¬FPS(U,L));  join U + FPS(U,L);  join L + FPS(L,U);  new + FPS(new, U) + FPS(new, L) |
+//!
+//! The reachability prune `|total − N| ≤ cells_remaining` drops any state
+//! that can no longer hit exactly N components by the final cell.
 //!
 //! After placement the window slides when `k ≥ N`: slot 0 drops and may
-//! close a polyomino (its label is incremented in `closed`). `closed` is
-//! monotone non-decreasing, so `closed > N` is a hard prune.
+//! close a polyomino (its label is incremented in `closed`, and its FPS
+//! row is cleared). `closed` is monotone non-decreasing, so `closed > N`
+//! is a hard prune.
 //!
-//! Layer advance is parallelized with Rayon: each thread emits transitions
-//! into a thread-local `FxHashMap`, which is then merged at the end of the
-//! layer. Merging is the serialization point.
+//! Layer advance is parallelized with Rayon in four phases:
+//!   1. **Emit.** Each worker iterates its slice of the current layer and
+//!      pushes the produced `(State, Count)` transitions onto a thread-local
+//!      `Vec` — no deduplication at this stage, just raw emissions.
+//!   2. **Bucket.** Each worker redistributes its emissions into 256
+//!      shards keyed by `shard_idx(state)`; per-shard batches are flushed
+//!      into shared `Mutex<Vec<(State, Count)>>` shards (one lock
+//!      acquisition per shard per worker).
+//!   3. **Sort + fold.** Each shard is sorted by `State` in parallel with
+//!      `sort_unstable_by_key`, then a linear scan folds consecutive equal
+//!      states by summing their counts.
+//!   4. **Concat.** Shard results are concatenated into the next layer's
+//!      `Vec`. The vec is not globally sorted — shard order is by hash —
+//!      but the invariant "each `State` appears exactly once" holds.
+//!
+//! This replaces an earlier design that used `FxHashMap<State, Count>`
+//! per shard; random-access hashmap operations were the top profile item
+//! once canonicalize got optimized, and sort+fold is measurably faster in
+//! sequential-memory terms.
 //!
 //! ## Mirror-symmetry collapse
 //!
@@ -51,7 +83,6 @@ use crate::partition_count::state::{State, MAX_N};
 use num_bigint::BigUint;
 use parking_lot::Mutex;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -64,12 +95,15 @@ const SHARD_MASK: usize = NUM_SHARDS - 1;
 
 #[inline]
 fn shard_idx(state: State) -> usize {
-    // Fibonacci-hash of the xor-folded 128-bit state. The low slot bits of
-    // `state.0` are not uniformly distributed (slot 0 is always label 1 when
+    // Fibonacci-hash of the xor-folded state words. The low slot bits of
+    // `labels` are not uniformly distributed (slot 0 is always label 1 when
     // occupied in canonical form), so we xor-fold and multiply to spread.
-    let lo = state.0 as u64;
-    let hi = (state.0 >> 64) as u64;
-    let mixed = (lo ^ hi).wrapping_mul(0x9E3779B97F4A7C15);
+    let labels_lo = state.labels as u64;
+    let labels_hi = (state.labels >> 64) as u64;
+    let fps_lo = state.fps as u64;
+    let fps_hi = (state.fps >> 64) as u64;
+    let folded = labels_lo ^ labels_hi ^ fps_lo ^ fps_hi;
+    let mixed = folded.wrapping_mul(0x9E3779B97F4A7C15);
     (mixed as usize) & SHARD_MASK
 }
 
@@ -153,8 +187,7 @@ pub fn count_partitions(
     let start = Instant::now();
     let mut last_progress = start;
 
-    let mut layer: FxHashMap<State, Count> = FxHashMap::default();
-    layer.insert(State::EMPTY, Count::ONE);
+    let mut layer: Vec<(State, Count)> = vec![(State::EMPTY, Count::ONE)];
     let mut peak_layer_states = layer.len();
 
     for k in 0..total_cells {
@@ -171,65 +204,81 @@ pub fn count_partitions(
             layer = collapse_mirror(layer, n);
         }
 
-        // Two-phase parallel layer advance:
-        //   1. Fold: each Rayon worker builds its own thread-local
-        //      `FxHashMap`, with zero lock contention on the hot path.
-        //   2. Sharded merge: partials are partitioned by shard_idx(state)
-        //      and flushed in parallel, one lock per shard per worker.
-        //      This replaces rayon's tree `reduce` whose final merge was
-        //      serial.
-        let partials: Vec<FxHashMap<State, Count>> = layer
-            .par_iter()
-            .fold(FxHashMap::default, |mut local, (state, count)| {
-                advance_one_local(
-                    *state,
-                    count,
-                    c,
-                    is_sliding,
-                    window_size_before,
-                    cells_remaining,
-                    n_u8,
-                    &mut local,
-                );
-                local
+        // Phases 1 & 2 fused: each rayon chunk emits, sort+folds its own
+        // partial locally, then buckets it into the 256 shared shards — all
+        // in one streaming pipeline. By running the bucket+flush as a
+        // for_each stage on the fold's chunk accumulators (rather than
+        // collecting them into a Vec<Vec> first), only O(num_threads)
+        // partials are alive simultaneously instead of all of them. At
+        // N=10 this drops the transient materialized-partials peak from
+        // ~400 MB to tens of MB.
+        //
+        // We also take ownership of `layer` here so we can drop it
+        // explicitly once phase 1 completes — no sense keeping the entire
+        // prior layer alive while phase 3 allocates space for the next.
+        let old_layer = std::mem::take(&mut layer);
+        let shards: Vec<Mutex<Vec<(State, Count)>>> =
+            (0..NUM_SHARDS).map(|_| Mutex::new(Vec::new())).collect();
+        {
+            let shards_ref: &[Mutex<Vec<(State, Count)>>] = &shards;
+            old_layer
+                .par_iter()
+                .fold(
+                    || Vec::with_capacity(1024),
+                    |mut local, (state, count)| {
+                        advance_one_local(
+                            *state,
+                            count,
+                            c,
+                            is_sliding,
+                            window_size_before,
+                            cells_remaining,
+                            n_u8,
+                            &mut local,
+                        );
+                        local
+                    },
+                )
+                .for_each(|mut partial| {
+                    partial.sort_unstable_by_key(|(s, _)| *s);
+                    fold_sorted_in_place(&mut partial);
+                    let mut batches: Vec<Vec<(State, Count)>> =
+                        (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+                    for entry in partial {
+                        let idx = shard_idx(entry.0);
+                        batches[idx].push(entry);
+                    }
+                    for (idx, batch) in batches.into_iter().enumerate() {
+                        if batch.is_empty() {
+                            continue;
+                        }
+                        let mut shard = shards_ref[idx].lock();
+                        shard.extend(batch);
+                    }
+                });
+        }
+        drop(old_layer);
+
+        // Phase 3: sort + linear fold per shard, in parallel. Reclaim
+        // the extend-growth over-allocation before sorting so we don't
+        // hold 2× buffers across the parallel phase.
+        let deduped: Vec<Vec<(State, Count)>> = shards
+            .into_par_iter()
+            .map(|mutex| {
+                let mut buf = mutex.into_inner();
+                buf.shrink_to_fit();
+                buf.sort_unstable_by_key(|(s, _)| *s);
+                fold_sorted_in_place(&mut buf);
+                buf.shrink_to_fit();
+                buf
             })
             .collect();
 
-        let shards: Vec<Mutex<FxHashMap<State, Count>>> =
-            (0..NUM_SHARDS).map(|_| Mutex::new(FxHashMap::default())).collect();
-
-        {
-            let shards_ref: &[Mutex<FxHashMap<State, Count>>] = &shards;
-            partials.into_par_iter().for_each(|partial| {
-                // Bucket by shard first so we hold each lock only once.
-                let mut batches: Vec<Vec<(State, Count)>> =
-                    (0..NUM_SHARDS).map(|_| Vec::new()).collect();
-                for (s, c) in partial {
-                    batches[shard_idx(s)].push((s, c));
-                }
-                for (idx, batch) in batches.into_iter().enumerate() {
-                    if batch.is_empty() {
-                        continue;
-                    }
-                    let mut shard = shards_ref[idx].lock();
-                    for (s, c) in batch {
-                        match shard.get_mut(&s) {
-                            Some(existing) => add_into(existing, &c),
-                            None => {
-                                shard.insert(s, c);
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        // Consolidate shards into a single map for the next iteration.
-        let total_entries: usize = shards.iter().map(|m| m.lock().len()).sum();
-        let mut next: FxHashMap<State, Count> =
-            FxHashMap::with_capacity_and_hasher(total_entries, Default::default());
-        for shard in shards.into_iter() {
-            next.extend(shard.into_inner());
+        // Phase 4: concatenate shard results into the next layer.
+        let total_entries: usize = deduped.iter().map(|v| v.len()).sum();
+        let mut next: Vec<(State, Count)> = Vec::with_capacity(total_entries);
+        for v in deduped {
+            next.extend(v);
         }
 
         peak_layer_states = peak_layer_states.max(next.len());
@@ -307,7 +356,7 @@ fn advance_one_local(
     window_size_before: usize,
     cells_remaining: usize,
     n_u8: u8,
-    next: &mut FxHashMap<State, Count>,
+    next: &mut Vec<(State, Count)>,
 ) {
     let up_label = if is_sliding { state.slot(0) } else { 0 };
     let left_label = if c > 0 {
@@ -316,34 +365,127 @@ fn advance_one_local(
         0
     };
     let active = state.active();
+    let new_fresh_label = active + 1;
 
-    // A. Start a new polyomino.
-    {
-        let new_label = active + 1;
-        let produced = apply_place(state, new_label, is_sliding, window_size_before);
-        try_accept_local(next, produced, count, n_u8, cells_remaining);
+    match (up_label, left_label) {
+        (0, 0) => {
+            // No placed neighbors: X must start a new component.
+            emit_new(
+                state, new_fresh_label, &[], is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+        }
+        (u, 0) => {
+            emit_join(
+                state, u, is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+            emit_new(
+                state, new_fresh_label, &[u], is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+        }
+        (0, l) => {
+            emit_join(
+                state, l, is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+            emit_new(
+                state, new_fresh_label, &[l], is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+        }
+        (u, l) if u == l => {
+            // Both neighbors share a component: join, or start new + FPS(new, U).
+            emit_join(
+                state, u, is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+            emit_new(
+                state, new_fresh_label, &[u], is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+        }
+        (u, l) => {
+            // Distinct components: four combos.
+            // (T,T): merge U and L, X joins merged component. Blocked if
+            // U and L are already in FPS.
+            if !state.fps_bit(u, l) {
+                let keep = u.min(l);
+                let drop_ = u.max(l);
+                let merged = state.merge_labels(drop_, keep);
+                let produced = apply_place(merged, keep, is_sliding, window_size_before);
+                try_accept_emit(next, produced, count, n_u8, cells_remaining);
+            }
+            // (T,D): X joins U, edge (X,L) not-taken → FPS(U, L).
+            emit_join_with_forbid(
+                state, u, l, is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+            // (D,T): X joins L, edge (X,U) not-taken → FPS(L, U).
+            emit_join_with_forbid(
+                state, l, u, is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+            // (D,D): X starts new, both edges not-taken → FPS(new, U) and FPS(new, L).
+            emit_new(
+                state, new_fresh_label, &[u, l], is_sliding, window_size_before,
+                count, n_u8, cells_remaining, next,
+            );
+        }
     }
+}
 
-    // B. Join the up-neighbor's polyomino.
-    if up_label != 0 {
-        let produced = apply_place(state, up_label, is_sliding, window_size_before);
-        try_accept_local(next, produced, count, n_u8, cells_remaining);
-    }
+#[inline]
+fn emit_join(
+    state: State,
+    join_label: u8,
+    is_sliding: bool,
+    window_size_before: usize,
+    count: &Count,
+    n_u8: u8,
+    cells_remaining: usize,
+    next: &mut Vec<(State, Count)>,
+) {
+    let produced = apply_place(state, join_label, is_sliding, window_size_before);
+    try_accept_emit(next, produced, count, n_u8, cells_remaining);
+}
 
-    // C. Join the left-neighbor's polyomino (skip if it's the same as up's).
-    if left_label != 0 && left_label != up_label {
-        let produced = apply_place(state, left_label, is_sliding, window_size_before);
-        try_accept_local(next, produced, count, n_u8, cells_remaining);
-    }
+#[inline]
+fn emit_join_with_forbid(
+    state: State,
+    join_label: u8,
+    forbid_label: u8,
+    is_sliding: bool,
+    window_size_before: usize,
+    count: &Count,
+    n_u8: u8,
+    cells_remaining: usize,
+    next: &mut Vec<(State, Count)>,
+) {
+    let with_fps = state.with_fps_set(join_label, forbid_label);
+    let produced = apply_place(with_fps, join_label, is_sliding, window_size_before);
+    try_accept_emit(next, produced, count, n_u8, cells_remaining);
+}
 
-    // D. Merge up and left.
-    if up_label != 0 && left_label != 0 && up_label != left_label {
-        let keep = up_label.min(left_label);
-        let drop_ = up_label.max(left_label);
-        let merged = state.merge_labels(drop_, keep);
-        let produced = apply_place(merged, keep, is_sliding, window_size_before);
-        try_accept_local(next, produced, count, n_u8, cells_remaining);
+#[inline]
+fn emit_new(
+    state: State,
+    new_label: u8,
+    forbid_with: &[u8],
+    is_sliding: bool,
+    window_size_before: usize,
+    count: &Count,
+    n_u8: u8,
+    cells_remaining: usize,
+    next: &mut Vec<(State, Count)>,
+) {
+    let mut s = state;
+    for &other in forbid_with {
+        s = s.with_fps_set(new_label, other);
     }
+    let produced = apply_place(s, new_label, is_sliding, window_size_before);
+    try_accept_emit(next, produced, count, n_u8, cells_remaining);
 }
 
 fn apply_place(
@@ -354,9 +496,15 @@ fn apply_place(
 ) -> State {
     let old_closed = state.closed();
     if is_sliding {
-        let (shifted, _dropped, was_closed) = state.shift_in(window_size_before, new_label);
+        let (shifted, dropped, was_closed) = state.shift_in(window_size_before, new_label);
         let new_closed = old_closed + if was_closed { 1 } else { 0 };
-        shifted.with_closed(new_closed).canonicalize()
+        let mut s = shifted.with_closed(new_closed);
+        if was_closed {
+            // The dropped label's polyomino has fully left the frontier —
+            // its FPS entries can never matter again, so drop them.
+            s = s.with_fps_row_cleared(dropped);
+        }
+        s.canonicalize()
     } else {
         state
             .with_slot(window_size_before, new_label)
@@ -364,8 +512,8 @@ fn apply_place(
     }
 }
 
-fn try_accept_local(
-    next: &mut FxHashMap<State, Count>,
+fn try_accept_emit(
+    next: &mut Vec<(State, Count)>,
     produced: State,
     count: &Count,
     n_u8: u8,
@@ -379,12 +527,33 @@ fn try_accept_local(
     if gap > cells_remaining {
         return;
     }
-    match next.get_mut(&produced) {
-        Some(existing) => add_into(existing, count),
-        None => {
-            next.insert(produced, count.clone());
+    next.push((produced, count.clone()));
+}
+
+/// In-place linear fold on a vec that is already sorted by `State`:
+/// consecutive equal states get their counts summed and the duplicates
+/// are dropped. Reuses the input vec's allocation — no second buffer —
+/// to keep peak memory per-shard equal to the pre-dedup size rather than
+/// twice that.
+fn fold_sorted_in_place(v: &mut Vec<(State, Count)>) {
+    let len = v.len();
+    if len < 2 {
+        return;
+    }
+    let mut write = 0usize;
+    for read in 1..len {
+        if v[read].0 == v[write].0 {
+            // Move the read-side count into `taken` and accumulate into write.
+            let taken = std::mem::replace(&mut v[read].1, Count::ZERO);
+            add_into(&mut v[write].1, &taken);
+        } else {
+            write += 1;
+            if write != read {
+                v.swap(write, read);
+            }
         }
     }
+    v.truncate(write + 1);
 }
 
 /// Fold each state in the layer to the `min(s, H(s))` representative and
@@ -397,20 +566,19 @@ fn try_accept_local(
 /// bijection. Collapsing this way after the first row boundary is necessary
 /// because subsequent layers are derived from representatives and therefore
 /// lack the mirror partners that existed in the original state space.
-fn collapse_mirror(layer: FxHashMap<State, Count>, n: usize) -> FxHashMap<State, Count> {
-    let mut out: FxHashMap<State, Count> =
-        FxHashMap::with_capacity_and_hasher(layer.len() / 2 + 8, Default::default());
-    for (s, c) in layer.iter() {
-        let m = s.mirror(n);
-        let rep = if *s <= m { *s } else { m };
-        match out.get_mut(&rep) {
-            Some(existing) => add_into(existing, c),
-            None => {
-                out.insert(rep, c.clone());
-            }
-        }
-    }
-    out
+fn collapse_mirror(layer: Vec<(State, Count)>, n: usize) -> Vec<(State, Count)> {
+    let mut mapped: Vec<(State, Count)> = layer
+        .into_iter()
+        .map(|(s, c)| {
+            let m = s.mirror(n);
+            let rep = if s <= m { s } else { m };
+            (rep, c)
+        })
+        .collect();
+    mapped.sort_unstable_by_key(|(s, _)| *s);
+    fold_sorted_in_place(&mut mapped);
+    mapped.shrink_to_fit();
+    mapped
 }
 
 /// Resident set size peak, in bytes. Falls back to `0` on unsupported

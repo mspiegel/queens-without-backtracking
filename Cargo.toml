@@ -15,7 +15,6 @@ rayon = "1.10"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 parking_lot = "0.12"
-mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 lto = "fat"

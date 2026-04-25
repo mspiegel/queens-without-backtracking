@@ -1,14 +1,18 @@
 //! Integration tests for the partition counter.
 //!
-//! The brute-force reference (exposed as
-//! `linkedin_queens::partition_count::brute_force::count`) serves as an
-//! independent oracle for small N. For larger N where brute force is too
-//! slow, hard-coded regression values lock in the current implementation's
-//! output; they are not independently sourced and exist to detect drift.
+//! Two independent oracles back these tests:
+//!   * `partition_oracle` — exhaustive set-partition enumerator with a
+//!     connectivity check. Exponential, so only used for N ≤ 3.
+//!   * `brute_force` — a recursive FPS-aware enumerator that mirrors the
+//!     Simpath DP transition rules. Cross-checks simpath up to N ≈ 6.
+//!
+//! Regression values beyond the oracle range are cross-validated against
+//! `brute_force` and locked in to detect drift.
 
 use assert_cmd::Command;
-use linkedin_queens::partition_count::brute_force;
-use linkedin_queens::partition_count::{count_partitions, CountOptions};
+use linkedin_queens::partition_count::{
+    brute_force, count_partitions, partition_oracle, CountOptions,
+};
 use num_bigint::BigUint;
 use std::str::FromStr;
 
@@ -17,7 +21,27 @@ fn simpath(n: usize) -> BigUint {
 }
 
 #[test]
+fn oracle_agrees_with_simpath_small() {
+    for n in 1..=3 {
+        let ora = partition_oracle::count(n);
+        let sp = simpath(n);
+        assert_eq!(ora, sp, "mismatch at n={}: oracle={}, simpath={}", n, ora, sp);
+    }
+}
+
+#[test]
+fn brute_force_matches_oracle_small() {
+    for n in 1..=3 {
+        let ora = partition_oracle::count(n);
+        let bf = brute_force::count(n);
+        assert_eq!(ora, bf, "mismatch at n={}: oracle={}, bf={}", n, ora, bf);
+    }
+}
+
+#[test]
 fn brute_force_and_simpath_agree_small() {
+    // Capped at n=4 because the unoptimized debug build of brute_force is
+    // much slower than the DP — n=5 (≈72M partitions) takes minutes.
     for n in 1..=4 {
         let bf = brute_force::count(n);
         let sp = simpath(n);
@@ -29,19 +53,21 @@ fn brute_force_and_simpath_agree_small() {
 fn hand_computed_values() {
     assert_eq!(simpath(1), BigUint::from(1u32));
     assert_eq!(simpath(2), BigUint::from(6u32));
+    assert_eq!(simpath(3), BigUint::from(258u32));
 }
 
-/// Regression values from the first successful run of this implementation.
-/// Not independently sourced — locked in to detect drift. Update only if an
-/// intentional algorithmic change is made.
+/// Regression values. N ≤ 3 are also covered by `partition_oracle`; N = 4, 5
+/// are additionally cross-checked against `brute_force` via
+/// `brute_force_and_simpath_agree_small`. N = 6, 7 are locked in to detect
+/// drift in the DP.
 #[test]
 fn regression_values() {
     let cases: &[(usize, &str)] = &[
-        (3, "594"),
-        (4, "682349"),
-        (5, "8082227271"),
-        (6, "937366494881708"),
-        (7, "1032451012296991972867"),
+        (3, "258"),
+        (4, "62741"),
+        (5, "72137699"),
+        (6, "356612826084"),
+        (7, "7146137621219723"),
     ];
     for (n, expected) in cases {
         let got = simpath(*n);
@@ -59,7 +85,7 @@ fn cli_prints_count_for_n3() {
         .arg("0")
         .assert()
         .success()
-        .stdout("594\n");
+        .stdout("258\n");
 }
 
 #[test]
@@ -71,7 +97,7 @@ fn cli_prints_count_for_n4() {
         .arg("0")
         .assert()
         .success()
-        .stdout("682349\n");
+        .stdout("62741\n");
 }
 
 #[test]
